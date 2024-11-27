@@ -265,6 +265,7 @@ There are additional optional arguments
 
 * `-W`, `--overwrite`: it allows to overwrite results.
 * `-C`, `--clonemap`: it can be used to define a clone map when the LDD input map (argument `-l`) is in NetCDF format.
+* `-p`, `--num_processes`: it can be used to select the number of processes to use when cutting multiple files (default=1).
 
 #### Examples 
 

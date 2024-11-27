@@ -20,6 +20,8 @@ import argparse
 import os
 import shutil
 import sys
+from multiprocessing import Pool, cpu_count
+from functools import partial
 
 from .. import version, logger
 from .cutlib import mask_from_ldd, get_filelist, get_cuts, cutmap
@@ -78,6 +80,62 @@ class ParserHelpOnError(argparse.ArgumentParser):
                           default='./cutmaps_out', required=True)
         self.add_argument("-W", "--overwrite", help='Set flag to overwrite existing files',
                           default=False, required=False, action='store_true')
+        self.add_argument("-p", "--num_processes",
+                          help='Number of processes to use when cutting multiple files',
+                          default=1, type=int)
+
+
+def cut_file(args, x_min, x_max, y_min, y_max, ldd, file_to_cut):
+
+    filename, ext = os.path.splitext(file_to_cut)
+
+    # localdir used only with args.subdir.
+    # It will track folder structures in a EFAS/GloFAS like setup and replicate it in output folder
+    localdir = os.path.dirname(file_to_cut)\
+        .replace(os.path.dirname(args.subdir), '')\
+        .lstrip('/') if args.subdir else ''
+
+    fileout = os.path.join(args.outpath, localdir, os.path.basename(file_to_cut))
+    if os.path.isdir(file_to_cut) and args.subdir:
+        # just create folder
+        os.makedirs(fileout, exist_ok=True)
+        return
+    if ext != '.nc':
+        if args.subdir:
+            logger.warning('%s is not in netcdf format, just copying to ouput folder', file_to_cut)
+            shutil.copy(file_to_cut, fileout)
+        else:
+            logger.warning('%s is not in netcdf format, skipping...', file_to_cut)
+        return
+    elif os.path.isfile(fileout) and os.path.exists(fileout) and not args.overwrite:
+        logger.warning('%s already existing. This file will not be overwritten', fileout)
+        return
+
+    cutmap(file_to_cut, fileout, x_min, x_max, y_min, y_max, use_coords=(args.cuts_indices is None))
+    if ldd and args.stations:
+        with Dataset(os.path.join(args.outpath, 'my_mask.nc'),'r',format='NETCDF4_CLASSIC') as mask_map:
+            for k in mask_map.variables.keys():
+                if (k !='x'  and k !='y'  and k !='lat'  and k !='lon'):
+                    mask_map_values=mask_map.variables[k][:]
+        with Dataset(fileout,'r+',format='NETCDF4_CLASSIC') as file_out:
+            for name, variable in file_out.variables.items():
+                data=[]
+                if (variable.dtype != '|S1' and name != 'crs' and name != 'wgs_1984' and name != 'lambert_azimuthal_equal_area'):
+                    k = name
+                    data=file_out.variables[k][:]
+
+                    if (len(data.shape)==2):
+                        values=[]
+                        values=file_out.variables[k][:]
+                        values2=np.where(mask_map_values==1,values,np.nan)
+                        file_out.variables[k][:] = values2
+
+                    if (len(data.shape)>2):
+                        for t in np.arange(data.shape[0]):
+                            values=[]
+                            values=file_out.variables[k][:][t]
+                            values2=np.where(mask_map_values==1,values,np.nan)
+                            file_out.variables[k][t,:,:] = values2
 
 
 def main(cliargs):
@@ -119,58 +177,14 @@ def main(cliargs):
 
     list_to_cut = get_filelist(input_folder, static_data_folder, input_file)
 
-    # walk through list_to_cut
-    for file_to_cut in list_to_cut:
-
-        filename, ext = os.path.splitext(file_to_cut)
-
-        # localdir used only with static_data_folder.
-        # It will track folder structures in a EFAS/GloFAS like setup and replicate it in output folder
-        localdir = os.path.dirname(file_to_cut)\
-            .replace(os.path.dirname(static_data_folder), '')\
-            .lstrip('/') if static_data_folder else ''
-
-        fileout = os.path.join(pathout, localdir, os.path.basename(file_to_cut))
-        if os.path.isdir(file_to_cut) and static_data_folder:
-            # just create folder
-            os.makedirs(fileout, exist_ok=True)
-            continue
-        if ext != '.nc':
-            if static_data_folder:
-                logger.warning('%s is not in netcdf format, just copying to ouput folder', file_to_cut)
-                shutil.copy(file_to_cut, fileout)
-            else:
-                logger.warning('%s is not in netcdf format, skipping...', file_to_cut)
-            continue
-        elif os.path.isfile(fileout) and os.path.exists(fileout) and not overwrite:
-            logger.warning('%s already existing. This file will not be overwritten', fileout)
-            continue
-
-        cutmap(file_to_cut, fileout, x_min, x_max, y_min, y_max, use_coords=(cuts_indices is None))
-        if ldd and stations:
-            with Dataset(os.path.join(pathout, 'my_mask.nc'),'r',format='NETCDF4_CLASSIC')  as mask_map:  
-                for k in mask_map.variables.keys():        
-                    if (k !='x'  and k !='y'  and k !='lat'  and k !='lon'):
-                        mask_map_values=mask_map.variables[k][:] 
-            with Dataset(fileout,'r+',format='NETCDF4_CLASSIC') as file_out:                                    
-                for name, variable in file_out.variables.items():
-                    data=[]   
-                    if (variable.dtype != '|S1' and name != 'crs' and name != 'wgs_1984' and name != 'lambert_azimuthal_equal_area'): 
-                        k = name
-                        data=file_out.variables[k][:] 
-                    
-                        if (len(data.shape)==2):
-                            values=[]
-                            values=file_out.variables[k][:]              
-                            values2=np.where(mask_map_values==1,values,np.nan)
-                            file_out.variables[k][:] = values2
-                            
-                        if (len(data.shape)>2):
-                            for t in np.arange(data.shape[0]):
-                                values=[]
-                                values=file_out.variables[k][:][t]               
-                                values2=np.where(mask_map_values==1,values,np.nan)
-                                file_out.variables[k][t,:,:] = values2
+    # set the number of processes to use for cutting list_to_cut:
+    number_of_cores = int(os.environ.get('SLURM_CPUS_PER_TASK', cpu_count()))
+    num_processes = min(number_of_cores, len(list_to_cut), args.num_processes)
+    logger.info(f'Cutting using {num_processes} processes.')
+    # apply cut_file function to all the files in list_to_cut
+    cut_file_with_args = partial(cut_file, args, x_min, x_max, y_min, y_max, ldd)
+    with Pool(num_processes) as pool:
+        pool.map_async(cut_file_with_args, list_to_cut, chunksize=1).get()
                                    
 def main_script():
     sys.exit(main(sys.argv[1:]))
