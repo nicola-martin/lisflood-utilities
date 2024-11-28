@@ -85,21 +85,23 @@ class ParserHelpOnError(argparse.ArgumentParser):
                           default=1, type=int)
 
 
+def get_fileout_path(file_to_cut, outpath, subdir):
+    # localdir used only with subdir.
+    # It will track folder structures in a EFAS/GloFAS like setup and replicate it in output folder
+    localdir = os.path.dirname(file_to_cut)\
+        .replace(os.path.dirname(subdir), '')\
+        .lstrip('/') if subdir else ''
+
+    fileout = os.path.join(outpath, localdir, os.path.basename(file_to_cut))
+    return fileout
+
+
 def cut_file(args, x_min, x_max, y_min, y_max, ldd, file_to_cut):
 
     filename, ext = os.path.splitext(file_to_cut)
 
-    # localdir used only with args.subdir.
-    # It will track folder structures in a EFAS/GloFAS like setup and replicate it in output folder
-    localdir = os.path.dirname(file_to_cut)\
-        .replace(os.path.dirname(args.subdir), '')\
-        .lstrip('/') if args.subdir else ''
+    fileout = get_fileout_path(file_to_cut, args.outpath, args.subdir)
 
-    fileout = os.path.join(args.outpath, localdir, os.path.basename(file_to_cut))
-    if os.path.isdir(file_to_cut) and args.subdir:
-        # just create folder
-        os.makedirs(fileout, exist_ok=True)
-        return
     if ext != '.nc':
         if args.subdir:
             logger.warning('%s is not in netcdf format, just copying to ouput folder', file_to_cut)
@@ -176,6 +178,15 @@ def main(cliargs):
                 pathout, overwrite)
 
     list_to_cut = get_filelist(input_folder, static_data_folder, input_file)
+
+    # deal with folder structures:
+    if static_data_folder:
+        for file_to_cut in list_to_cut:
+            fileout = get_fileout_path(file_to_cut, pathout, static_data_folder)
+            if os.path.isdir(file_to_cut):
+                # just create folder
+                os.makedirs(fileout, exist_ok=True)
+                list_to_cut.remove(file_to_cut)
 
     # set the number of processes to use for cutting list_to_cut:
     number_of_cores = int(os.environ.get('SLURM_CPUS_PER_TASK', cpu_count()))
